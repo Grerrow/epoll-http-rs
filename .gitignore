@@ -1,2 +1,7 @@
 /target
+.github
+tests/
+src/config_parser/
+
 notes.md
+test_upload.txt
