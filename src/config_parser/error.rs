@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter, Result};
 
 // Error Handling for config parser: line number, error message
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParseError {
     pub line: usize,
     pub message: String,

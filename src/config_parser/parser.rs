@@ -56,16 +56,6 @@ impl ConfigParser {
 
     // EXPECT + CONSUME for Tokens METHODS ------------------------------------------------------------------
     // all expect/consume methods include advance_parser() to move to the next token after successfully matching/consuming the current one.
-    fn expect_word(&mut self, expected: &str) -> Result<(), ParseError> {
-        match self.current() {
-            Some(Token::Word(w)) if w == expected => {
-                self.advance_parser();
-                Ok(())
-            }
-            Some(Token::Word(w)) => Err(ParseError::new(self.current_line(), format!("Expected '{}', got '{}'", expected, w))),
-            other => Err(ParseError::new(self.current_line(), format!("Expected '{}', got {:?}", expected, other))),
-        }
-    }
 
     fn expect_open_brace(&mut self) -> Result<(), ParseError> {
         match self.current() {
@@ -104,16 +94,51 @@ impl ConfigParser {
     // PARSE SERVER METHODS ---------------------------------------------------------------------------------
     fn parse_servers(&mut self) -> Result<Vec<ServerConfig>, ParseError> {
         let mut servers = Vec::new();
+        let mut first_error: Option<ParseError> = None;
 
-        while self.current().is_some() { // is_some is an Option method that returns true if the Option is Some, false if it's None
-            self.expect_word("server")?; // we expect the first token to be "server" (if not, return an error and stop parsing)
-            self.expect_open_brace()?;
-            let server = self.parse_server()?;
-            self.expect_close_brace()?;
-            servers.push(server);
+        while self.current().is_some() {
+        // is_some is an Option method that returns true if the Option is Some, false if it's None
+        // so this actually means if we still have tokens to parse
+
+            match self.current() {
+                Some(Token::Word(w)) if w == "server" => {
+                    self.advance_parser();
+                    if self.expect_open_brace().is_err() {
+                        eprintln!("Missing '{{' after 'server'");
+                        self.skip_to_closing_brace(); // skip the rest of the server block if we don't find an open brace after "server"
+                        continue;
+                    }
+                    match self.parse_server() {
+                        Ok(server) => {
+                            let _ = self.expect_close_brace();
+                            servers.push(server);
+                            }
+                        Err(e) => {
+                            if first_error.is_none() {
+                                first_error = Some(e.clone());
+                                }
+                            eprintln!("{}", e);
+                            if !e.message.contains("Missing closing brace") {
+                                self.skip_to_closing_brace(); // skip this only if we dont have a missing closing brace error
+                                }
+                            }
+                    }
+                }
+                _ => {
+                    self.advance_parser();
+                }
+            }
+
         }
 
-        Ok(servers)
+        if !servers.is_empty() {
+            Ok(servers)
+        } else if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Err(ParseError::new(0, "Not a single valid server configuration found".to_string()))
+        }
+
     }
 
     fn parse_server(&mut self) -> Result<ServerConfig, ParseError> {
@@ -182,6 +207,9 @@ impl ConfigParser {
                             routes.push(route);
                         }
                         _ => {
+                            if w == "server" {
+                                return Err(ParseError::new(self.current_line(), "Missing closing brace '}' in server block".to_string()));
+                            }
                             return Err(ParseError::new(self.current_line(), format!("Unknown directive: {}", w)));
                         }
                     }
@@ -214,6 +242,25 @@ impl ConfigParser {
             client_max_body_size,
             routes,
         })
+    }
+
+    // this helper function is used to skip the rest of the current server block if we encounter an error in it, so we continue parseing the next one
+    fn skip_to_closing_brace(&mut self) {
+        let mut brace_depth = 1;
+        while self.current().is_some() && brace_depth > 0 {
+            match self.current() {
+                Some(Token::OpenBrace) => brace_depth += 1,
+                Some(Token::CloseBrace) => brace_depth -= 1,
+                _ => {}
+            }
+            if brace_depth > 0 {
+                self.advance_parser();
+            }
+        }
+        
+        if self.current() == Some(&Token::CloseBrace) { // consume the final "}"
+            self.advance_parser();
+        }
     }
 
     // PARSE ROUTE METHODS ----------------------------------------------------------------------------------

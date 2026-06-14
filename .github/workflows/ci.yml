@@ -3,13 +3,13 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - master
       - development
       - psi
       - Christos
   pull_request:
     branches:
-      - main
+      - master
       - development
 
 jobs:
