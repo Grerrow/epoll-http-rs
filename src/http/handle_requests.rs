@@ -100,13 +100,19 @@ impl HttpRequest {
 
 impl HttpRequest {
     // handle POST request
-    pub fn handle_post(&self, route: &RouteConfig, server: &ServerConfig) -> Vec<u8> {
-        if let Some(content_type) = self.headers.get("Content-Type") {
-            if content_type.contains("multipart/form-data") {
-                return self.handle_uploaded_file(route);
+    pub fn handle_post(&self, route: &RouteConfig, server: &ServerConfig, client: &mut Client) -> RouteAction {
+        if let Some(ext) = route.cgi_extension.as_deref() {
+            if self.path.ends_with(ext) {
+                return self.handle_cgi(&self.path, route, client);
             }
         }
-        HttpResponseError::new_err_response_with_pages(400, "Bad Request", &server.error_pages)
+
+        if let Some(content_type) = self.headers.get("Content-Type") {
+            if content_type.contains("multipart/form-data") {
+                return RouteAction::Immediate(self.handle_uploaded_file(route));
+            }
+        }
+        RouteAction::Immediate(HttpResponseError::new_err_response_with_pages(400, "Bad Request", &server.error_pages))
     }
 }
 
@@ -171,7 +177,7 @@ impl HttpRequest {
         }
         match self.method.as_str() {
             "GET" => self.handle_get(route, server, client),
-            "POST" => RouteAction::Immediate(self.handle_post(route, server)),
+            "POST" => self.handle_post(route, server, client),
             "DELETE" => RouteAction::Immediate(self.handle_delete(route, server)),
             _ => RouteAction::Immediate(HttpResponseError::new_err_response_with_pages(405, "Method Not Allowed", &server.error_pages)),
         }

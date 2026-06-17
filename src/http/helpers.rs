@@ -129,6 +129,16 @@ impl HttpRequest {
             .unwrap_or(path)
             .trim_start_matches('/');
         let cgi_script_path = Path::new(&route.root).join(script_rel);
+        let script_name = if route.path == "/" {
+            format!("/{}", script_rel)
+        } else {
+            format!("{}/{}", route.path.trim_end_matches('/'), script_rel)
+        };
+
+        let (request_path_no_query, query_string) = match self.path.split_once('?') {
+            Some((p, q)) => (p.to_string(), q.to_string()),
+            None => (self.path.clone(), String::new()),
+        };
 
         if !cgi_script_path.exists() {
             return RouteAction::Immediate(HttpResponseError::new_err_response(404, "Not Found"));
@@ -154,13 +164,40 @@ impl HttpRequest {
             None
         };
 
+        let mut stdin_pipe = [0; 2];
+        if unsafe { libc::pipe(stdin_pipe.as_mut_ptr()) } != 0 {
+            return RouteAction::Immediate(HttpResponseError::new_err_response(500, "Failed to create CGI stdin pipe"));
+        }
+
         let pid = unsafe { libc::fork() };
         if pid < 0 {
+            unsafe {
+                libc::close(stdin_pipe[0]);
+                libc::close(stdin_pipe[1]);
+            }
             return RouteAction::Immediate(HttpResponseError::new_err_response(500, "Internal Server Error"));
         }
 
         if pid == 0 {
             unsafe {
+                libc::close(stdin_pipe[1]);
+                if libc::dup2(stdin_pipe[0], libc::STDIN_FILENO) < 0 {
+                    libc::_exit(1);
+                }
+                libc::close(stdin_pipe[0]);
+
+                let set_env = |key: &str, value: &str| -> bool {
+                    let key_c = match CString::new(key) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
+                    let value_c = match CString::new(value) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
+                    libc::setenv(key_c.as_ptr(), value_c.as_ptr(), 1) == 0
+                };
+
                 let output_path_c = match CString::new(output_path.clone()) {
                     Ok(v) => v,
                     Err(_) => libc::_exit(1),
@@ -179,16 +216,32 @@ impl HttpRequest {
                 libc::dup2(fd, libc::STDERR_FILENO);
                 libc::close(fd);
 
+                if !set_env("REQUEST_METHOD", &self.method) {
+                    libc::_exit(1);
+                }
+                if !set_env("PATH_INFO", &request_path_no_query) {
+                    libc::_exit(1);
+                }
+                if !set_env("SCRIPT_NAME", &script_name) {
+                    libc::_exit(1);
+                }
+                if !set_env("QUERY_STRING", &query_string) {
+                    libc::_exit(1);
+                }
+
+                let content_length = self.body.len().to_string();
+                if !set_env("CONTENT_LENGTH", &content_length) {
+                    libc::_exit(1);
+                }
+
+                if let Some(content_type) = self.headers.get("Content-Type") {
+                    if !set_env("CONTENT_TYPE", content_type) {
+                        libc::_exit(1);
+                    }
+                }
+
                 if let Some(session_id_value) = session_id.as_ref() {
-                    let key = match CString::new("SESSION_ID") {
-                        Ok(v) => v,
-                        Err(_) => libc::_exit(1),
-                    };
-                    let value = match CString::new(session_id_value.as_str()) {
-                        Ok(v) => v,
-                        Err(_) => libc::_exit(1),
-                    };
-                    if libc::setenv(key.as_ptr(), value.as_ptr(), 1) != 0 {
+                    if !set_env("SESSION_ID", session_id_value) {
                         libc::_exit(1);
                     }
                 }
@@ -206,6 +259,35 @@ impl HttpRequest {
                 libc::execvp(program.as_ptr(), argv.as_ptr());
                 libc::_exit(1);
             }
+        }
+
+        unsafe {
+            libc::close(stdin_pipe[0]);
+        }
+
+        let mut total_written = 0usize;
+        while total_written < self.body.len() {
+            let write_result = unsafe {
+                libc::write(
+                    stdin_pipe[1],
+                    self.body[total_written..].as_ptr() as *const libc::c_void,
+                    self.body.len() - total_written,
+                )
+            };
+
+            if write_result <= 0 {
+                unsafe {
+                    libc::close(stdin_pipe[1]);
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                return RouteAction::Immediate(HttpResponseError::new_err_response(500, "Failed to send body to CGI"));
+            }
+
+            total_written += write_result as usize;
+        }
+
+        unsafe {
+            libc::close(stdin_pipe[1]);
         }
 
         client.cgi_waiting = true;
