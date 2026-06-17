@@ -2,6 +2,7 @@ use crate::http::request::HttpRequest;
 use crate::http::response::{ HttpResponseError, HttpResponseOk };
 use crate::config::{RouteConfig, Method, ServerConfig};
 use crate::client::Client;
+use crate::SESSION_STORE;
 use std::path::{Path, PathBuf};
 
 pub enum RouteAction {
@@ -58,8 +59,20 @@ impl HttpRequest {
 
     // handle GET request
     pub fn handle_get(&self, route: &RouteConfig, server: &ServerConfig, client: &mut Client) -> RouteAction {
-        if route.cookie_required && !self.cookies {
-            return RouteAction::Immediate(HttpResponseError::new_err_response_with_pages(403, "Forbidden", &server.error_pages));
+        if route.cookie_required {
+            let Some(session_id) = self.session_id.as_ref() else {
+                return RouteAction::Immediate(HttpResponseError::new_err_response_with_pages(403, "Forbidden", &server.error_pages));
+            };
+
+            let is_valid = SESSION_STORE
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+                .lock()
+                .map(|sessions| sessions.contains(session_id))
+                .unwrap_or(false);
+
+            if !is_valid {
+                return RouteAction::Immediate(HttpResponseError::new_err_response_with_pages(403, "Forbidden", &server.error_pages));
+            }
         }
 
         if let Some(ext) = route.cgi_extension.as_deref() {

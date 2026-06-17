@@ -7,6 +7,7 @@ pub struct HttpRequest {
     version: String,
     pub headers: HashMap<String, String>,
     pub cookies: bool,
+    pub session_id: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -51,10 +52,12 @@ impl HttpRequest {
         //so now we start from the second line of header - line 1
         let mut headers = HashMap::new();
         let mut cookie_exist = false;
+        let mut session_id: Option<String> = None;
         for line in lines {
             if let Some((key, value)) = line.split_once(':') {
-                if line.starts_with("Cookie:") {
+                if key.trim().eq_ignore_ascii_case("Cookie") {
                     cookie_exist = true;
+                    session_id = extract_session_id(value.trim());
                 }
                 headers.insert(key.trim().to_string(), value.trim().to_string());
             }
@@ -66,6 +69,7 @@ impl HttpRequest {
             version,
             headers,
             cookies: cookie_exist,
+            session_id,
             body: body_part.to_vec(),
         };
         //validate the request
@@ -92,6 +96,25 @@ impl HttpRequest {
 
         Ok(self)
     }
+}
+
+fn extract_session_id(cookie_header_value: &str) -> Option<String> {
+    cookie_header_value
+        .split(';')
+        .map(|part| part.trim())
+        .find_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            if key.trim() == "session_id" {
+                let v = value.trim();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            } else {
+                None
+            }
+        })
 }
 
 

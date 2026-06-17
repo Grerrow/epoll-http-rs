@@ -3,6 +3,7 @@ use crate::http::handle_requests::RouteAction;
 use crate::http::response::{ HttpResponseError , HttpResponseOk };
 use crate::config::RouteConfig;
 use crate::client::Client;
+use crate::SESSION_STORE;
 use std::fs::File;
 use std::io::Write;
 use bytes::Bytes;
@@ -11,6 +12,7 @@ use futures::executor::block_on;
 use std::path::Path;
 use std::os::unix::io::AsRawFd;
 use std::ffi::CString;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 
 
@@ -133,6 +135,25 @@ impl HttpRequest {
         }
 
         let output_path = format!("/tmp/localhost-cgi-{}.out", client.socket.as_raw_fd());
+        let is_cookie_script = cgi_script_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .map(|f| f == "set_cookie.py")
+            .unwrap_or(false);
+
+        let session_id = if is_cookie_script {
+            let sid = generate_session_id();
+            if let Ok(mut sessions) = SESSION_STORE
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+                .lock()
+            {
+                sessions.insert(sid.clone());
+            }
+            Some(sid)
+        } else {
+            None
+        };
+
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return RouteAction::Immediate(HttpResponseError::new_err_response(500, "Internal Server Error"));
@@ -158,6 +179,20 @@ impl HttpRequest {
                 libc::dup2(fd, libc::STDERR_FILENO);
                 libc::close(fd);
 
+                if let Some(session_id_value) = session_id.as_ref() {
+                    let key = match CString::new("SESSION_ID") {
+                        Ok(v) => v,
+                        Err(_) => libc::_exit(1),
+                    };
+                    let value = match CString::new(session_id_value.as_str()) {
+                        Ok(v) => v,
+                        Err(_) => libc::_exit(1),
+                    };
+                    if libc::setenv(key.as_ptr(), value.as_ptr(), 1) != 0 {
+                        libc::_exit(1);
+                    }
+                }
+
                 let program = match CString::new("python3") {
                     Ok(v) => v,
                     Err(_) => libc::_exit(1),
@@ -180,4 +215,13 @@ impl HttpRequest {
         // DO NOT block
         RouteAction::Deferred
     }
+}
+
+
+//generate cookie helper
+fn generate_session_id() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
